@@ -1,0 +1,27 @@
+# ── Large datasets & intermediates (kept local, NOT pushed) ──────────────
+# GitHub rejects files >100 MB; these range up to 100 MB.
+driving_data*.json
+correction_data*.json
+guardian_data*.json
+*_backup_*.json
+
+# ── Run logs & offline validation outputs ────────────────────────────────
+play_logs/
+offline_validation/
+
+# ── Model experiments / backups (main bc_model.pth IS kept) ──────────────
+model_backups/
+bc_model_*.pth
+
+# ── Python ───────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ── OS / editor ──────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
