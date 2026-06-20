@@ -1,0 +1,11 @@
+# Python dependencies for TORCS_Human_BC
+# Install with:  pip install -r requirements.txt
+#
+# NOTE: this only covers the Python side. You also need a running TORCS
+# instance patched with the SCR (Simulated Car Racing) server, which the
+# agent connects to over a socket on port 3001. TORCS itself is not a pip
+# package — see the README for setup.
+
+torch>=2.0      # neural network (Actor MLP), training + inference
+numpy>=1.21     # state vectors, data handling
+pygame>=2.1     # keyboard input + HUD during human data collection
