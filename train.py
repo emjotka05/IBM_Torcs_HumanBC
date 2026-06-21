@@ -1,13 +1,12 @@
 """
-train.py — AI Training Pipeline for TORCS Corkscrew Track
-==========================================================
-AI controls: steer, accel, brake (full control)
-Code controls: gears only
+TORCS pipeline — record human demos, clone them, then let the net drive.
 
-Usage:
-  python train.py collect     # Phase 1: collect data
-  python train.py bc          # Phase 2: Behavioral Cloning
-  python train.py play        # Run trained model
+The policy network emits steering, throttle and brake every frame; only the
+gear is chosen by hand-written code. Main entry points:
+
+    python train.py human_collect   # drive yourself and record demos
+    python train.py bc               # fit the imitation policy
+    python train.py play             # hand the wheel to the trained policy
 """
 
 import numpy as np
@@ -22,7 +21,7 @@ COMMAND_FLAGS = set(COMMAND_ARGS[1:])
 sys.argv = [sys.argv[0]]
 
 
-def get_int_flag(name, default):
+def cli_int_flag(name, default):
     args = COMMAND_ARGS[1:]
     prefix = name + "="
     for i, arg in enumerate(args):
@@ -42,26 +41,26 @@ import snakeoil3_gym as snakeoil3
 
 PI = 3.14159265359
 
-# ============================================================
-# CONFIG
-# ============================================================
-STATE_DIM     = 17
-LEGACY_STATE_DIM = 20
-ACTION_DIM    = 3       # steer, accel, brake
-LAP_THRESHOLD = 3600
-DATA_FILE     = "driving_data.json"
-CORRECTION_FILE = "correction_data.json"
-CORRECTION_PENDING_FILE = "correction_data_toCombine.json"
-CORRECTION_REPEAT = 5
-PLAY_LOG_DIR  = "play_logs"
-PORT          = 3001
+# -------------------------------------------------------------------------
+# Constants & file paths
+# -------------------------------------------------------------------------
+FEATURE_DIM     = 17
+LEGACY_FEATURE_DIM = 20
+CONTROL_DIM    = 3       # steer, accel, brake
+LAP_LENGTH_M = 3600
+DATASET_PATH     = "driving_data.json"
+CORRECTIONS_PATH = "correction_data.json"
+CORRECTIONS_PENDING_PATH = "correction_data_toCombine.json"
+CORRECTION_OVERSAMPLE = 5
+RUN_LOG_DIR  = "play_logs"
+SCR_PORT          = 3001
 
 
 # Per-frame steering-change limit used to smooth model steering in play.
-BASE_STEER_RATE = 0.035
+STEER_SLEW_LIMIT = 0.035
 
 
-def get_state(S, lap_start_dist=0.0):
+def build_observation(S, lap_start_dist=0.0):
     track = S.get('track', [100.0] * 19)
 
     dist_raced = float(S.get('distRaced', 0.0))
@@ -75,7 +74,7 @@ def get_state(S, lap_start_dist=0.0):
     if lap_distance < 0.0:
         lap_distance = max(0.0, dist_raced)
 
-    lap_pos = (lap_distance % LAP_THRESHOLD) / LAP_THRESHOLD
+    lap_pos = (lap_distance % LAP_LENGTH_M) / LAP_LENGTH_M
     lap_angle = 2.0 * PI * lap_pos
 
     return np.array([
@@ -99,8 +98,8 @@ def get_state(S, lap_start_dist=0.0):
     ], dtype=np.float32)
 
 
-def prepare_training_samples(raw_data, source_name):
-    """Normalize fresh 17D and legacy 20D samples into the current 17D format."""
+def normalize_dataset(raw_data, source_name):
+    """Coerce 17D (and legacy 20D) rows into the current 17-feature layout."""
     prepared = []
     group_ids = []
     legacy_count = 0
@@ -113,15 +112,15 @@ def prepare_training_samples(raw_data, source_name):
         action = [float(x) for x in sample.get('action', [])]
         state_dim = len(state)
 
-        if state_dim not in (STATE_DIM, LEGACY_STATE_DIM):
+        if state_dim not in (FEATURE_DIM, LEGACY_FEATURE_DIM):
             raise ValueError(
                 f"{source_name}[{idx}] has state_dim={state_dim}, "
-                f"expected {STATE_DIM} or legacy {LEGACY_STATE_DIM}."
+                f"expected {FEATURE_DIM} or legacy {LEGACY_FEATURE_DIM}."
             )
-        if len(action) != ACTION_DIM:
+        if len(action) != CONTROL_DIM:
             raise ValueError(
                 f"{source_name}[{idx}] has action_dim={len(action)}, "
-                f"expected {ACTION_DIM}."
+                f"expected {CONTROL_DIM}."
             )
 
         lap_pos_raw = state[5] if len(state) > 5 else 0.0
@@ -129,12 +128,12 @@ def prepare_training_samples(raw_data, source_name):
             group_id += 1
             group_start_lap_pos = None
 
-        if state_dim == LEGACY_STATE_DIM:
+        if state_dim == LEGACY_FEATURE_DIM:
             legacy_count += 1
             if group_start_lap_pos is None:
                 group_start_lap_pos = lap_pos_raw
             lap_pos = (lap_pos_raw - group_start_lap_pos) % 1.0
-            state = state[:STATE_DIM]
+            state = state[:FEATURE_DIM]
             state[5] = lap_pos
             state[6] = float(np.sin(2.0 * PI * lap_pos))
             state[7] = float(np.cos(2.0 * PI * lap_pos))
@@ -152,8 +151,8 @@ def prepare_training_samples(raw_data, source_name):
     return prepared, group_ids, legacy_count
 
 
-def split_by_lap_groups(group_ids, min_lap_samples=500, val_fraction=0.20):
-    """Hold out whole lap-like groups so validation is not random-frame leakage."""
+def holdout_lap_groups(group_ids, min_lap_samples=500, val_fraction=0.20):
+    """Reserve whole laps for validation so adjacent frames cannot leak."""
     group_order = []
     group_counts = {}
     for gid in group_ids:
@@ -182,66 +181,66 @@ def split_by_lap_groups(group_ids, min_lap_samples=500, val_fraction=0.20):
     return train_idx, val_idx, group_counts, list(val_groups)
 
 
-# ============================================================
-# TARGET SPEED — unchanged
-# ============================================================
-def get_target_speed(track):
+# -------------------------------------------------------------------------
+# Look-ahead speed cap (scripted pilot)
+# -------------------------------------------------------------------------
+def speed_cap_from_track(track):
     front = [track[i] for i in range(7, 12)]
-    front_min = min(front)
+    ahead_min = min(front)
     wide_front = [track[i] for i in range(5, 14)]
-    wide_min = min(wide_front)
-    look_ahead = min(front_min, wide_min)
+    wide_band = min(wide_front)
+    clearance = min(ahead_min, wide_band)
 
-    if look_ahead > 180:   return 320
-    elif look_ahead > 150: return 300
-    elif look_ahead > 100: return 250
-    elif look_ahead > 80:  return 220
-    elif look_ahead > 50:  return 190
-    elif look_ahead > 38:  return 160
-    elif look_ahead > 30:  return 140
-    elif look_ahead > 25:  return 130
-    elif look_ahead > 18:  return 105
-    elif look_ahead > 12:  return 85
-    elif look_ahead > 8:   return 65
+    if clearance > 180:   return 320
+    elif clearance > 150: return 300
+    elif clearance > 100: return 250
+    elif clearance > 80:  return 220
+    elif clearance > 50:  return 190
+    elif clearance > 38:  return 160
+    elif clearance > 30:  return 140
+    elif clearance > 25:  return 130
+    elif clearance > 18:  return 105
+    elif clearance > 12:  return 85
+    elif clearance > 8:   return 65
     else:                  return 45
 
 
-def detect_corner_direction(track):
-    left_sum  = sum(track[0:7])
-    right_sum = sum(track[12:19])
-    diff = right_sum - left_sum
+def corner_bias(track):
+    left_open  = sum(track[0:7])
+    right_open = sum(track[12:19])
+    diff = right_open - left_open
     if abs(diff) < 30:
         return 0
     return 1 if diff > 0 else -1
 
 
-# ============================================================
-# BRAKE + GEARS — used only during collect, not in play
-# ============================================================
-def apply_brake_and_gears(S, R):
+# -------------------------------------------------------------------------
+# Scripted braking + gear logic (dataset capture only)
+# -------------------------------------------------------------------------
+def scripted_brake_and_shift(S, R):
     speed_x    = float(S.get('speedX', 0))
     angle      = float(S.get('angle', 0))
     speed_y    = float(S.get('speedY', 0))
     track      = S.get('track', [100.0] * 19)
-    wheel_spin = S.get('wheelSpinVel', [0, 0, 0, 0])
+    wheel_slip = S.get('wheelSpinVel', [0, 0, 0, 0])
 
-    target_speed = get_target_speed(track)
-    front_min = min(track[7], track[8], track[9], track[10], track[11])
+    v_cap = speed_cap_from_track(track)
+    ahead_min = min(track[7], track[8], track[9], track[10], track[11])
 
-    if front_min < 50 and speed_x > 140:
+    if ahead_min < 50 and speed_x > 140:
         R['brake'] = 0.7; R['accel'] = 0.0
-        _apply_gears(speed_x, R); return
-    if front_min < 30 and speed_x > 100:
+        pick_gear(speed_x, R); return
+    if ahead_min < 30 and speed_x > 100:
         R['brake'] = 0.9; R['accel'] = 0.0
-        _apply_gears(speed_x, R); return
+        pick_gear(speed_x, R); return
 
-    if speed_x > target_speed:
-        overspeed = speed_x - target_speed
-        if overspeed > 80:
+    if speed_x > v_cap:
+        excess = speed_x - v_cap
+        if excess > 80:
             R['brake'] = 1.0; R['accel'] = 0.0
-        elif overspeed > 50:
+        elif excess > 50:
             R['brake'] = 0.7; R['accel'] = 0.0
-        elif overspeed > 25:
+        elif excess > 25:
             R['brake'] = 0.4; R['accel'] = 0.0
         else:
             R['brake'] = 0.15
@@ -259,17 +258,17 @@ def apply_brake_and_gears(S, R):
         R['accel'] = min(R.get('accel', 0), 0.3)
 
     if speed_x > 10:
-        slip = sum(abs(wheel_spin[i] * 0.3 - speed_x) for i in range(4))
+        slip = sum(abs(wheel_slip[i] * 0.3 - speed_x) for i in range(4))
         if slip / 4 > speed_x * 0.5:
             R['brake'] = R.get('brake', 0) * 0.6
 
-    if (wheel_spin[2] + wheel_spin[3]) - (wheel_spin[0] + wheel_spin[1]) > 8:
+    if (wheel_slip[2] + wheel_slip[3]) - (wheel_slip[0] + wheel_slip[1]) > 8:
         R['accel'] = max(0.0, R.get('accel', 0) - 0.15)
 
-    _apply_gears(speed_x, R)
+    pick_gear(speed_x, R)
 
 
-def _apply_gears(speed_x, R):
+def pick_gear(speed_x, R):
     gear = 1
     if speed_x > 40:  gear = 2
     if speed_x > 70:  gear = 3
@@ -279,32 +278,32 @@ def _apply_gears(speed_x, R):
     R['gear'] = gear
 
 
-# ============================================================
-# RULE-BASED DRIVER — steer + accel (unchanged)
-# ============================================================
-STEER_LOCK = 0.366
+# -------------------------------------------------------------------------
+# Scripted steering + throttle — the demo pilot
+# -------------------------------------------------------------------------
+WHEEL_LOCK = 0.366
 
-def rule_based_steer_accel(S):
+def scripted_steer_throttle(S):
     angle     = float(S.get('angle', 0.0))
     track_pos = float(S.get('trackPos', 0.0))
     speed_x   = float(S.get('speedX', 0.0))
     track     = S.get('track', [100.0] * 19)
 
-    target_speed = get_target_speed(track)
+    v_cap = speed_cap_from_track(track)
 
-    steer = angle * 0.8 / STEER_LOCK - track_pos * 0.35
+    steer = angle * 0.8 / WHEEL_LOCK - track_pos * 0.35
 
-    corner_dir = detect_corner_direction(track)
-    if corner_dir != 0 and speed_x > 40 and abs(track_pos) < 0.4:
-        steer -= corner_dir * 0.1
+    turn_bias = corner_bias(track)
+    if turn_bias != 0 and speed_x > 40 and abs(track_pos) < 0.4:
+        steer -= turn_bias * 0.1
 
     steer = max(-1.0, min(1.0, steer))
 
-    speed_diff = target_speed - speed_x
-    if speed_x < target_speed:
-        if speed_diff > 60:    accel = 1.0
-        elif speed_diff > 30:  accel = 0.8
-        elif speed_diff > 10:  accel = 0.5
+    deficit = v_cap - speed_x
+    if speed_x < v_cap:
+        if deficit > 60:    accel = 1.0
+        elif deficit > 30:  accel = 0.8
+        elif deficit > 10:  accel = 0.5
         else:                  accel = 0.3
     else:
         accel = 0.0
@@ -325,64 +324,64 @@ def rule_based_steer_accel(S):
     return np.array([steer, accel], dtype=np.float32)
 
 
-# ============================================================
-# NEW: rule_based_action_with_brake
-# Returns [steer, accel, brake] — used only for data collection
-# ============================================================
-def rule_based_action_with_brake(S):
-    """Return [steer, accel, brake] for BC training."""
-    action_2 = rule_based_steer_accel(S)
+# -------------------------------------------------------------------------
+# Scripted full control: [steer, throttle, brake]
+# (only used to build the training dataset)
+# -------------------------------------------------------------------------
+def scripted_action(S):
+    """Full [steer, throttle, brake] target for a single frame."""
+    action_2 = scripted_steer_throttle(S)
     steer = float(action_2[0])
     accel = float(action_2[1])
 
-    # Compute brake using apply_brake_and_gears logic
+    # Compute brake using scripted_brake_and_shift logic
     R = {'steer': steer, 'accel': accel, 'brake': 0.0}
-    apply_brake_and_gears(S, R)
+    scripted_brake_and_shift(S, R)
     brake = float(R.get('brake', 0.0))
-    # Sync accel with what apply_brake_and_gears decided
+    # Sync accel with what scripted_brake_and_shift decided
     accel = float(R.get('accel', accel))
 
     return np.array([steer, accel, brake], dtype=np.float32)
 
 
-def rule_based_drive_full(S, R):
-    """Full rule-based drive for collect — no print."""
-    action = rule_based_action_with_brake(S)
+def scripted_pilot(S, R):
+    """Drive the car with the scripted pilot (silent)."""
+    action = scripted_action(S)
     R['steer'] = float(action[0])
     R['accel'] = float(action[1])
     R['brake'] = float(action[2])
-    _apply_gears(float(S.get('speedX', 0)), R)
+    pick_gear(float(S.get('speedX', 0)), R)
 
 
-# ============================================================
-# PHASE 1: COLLECT DATA
-# ============================================================
-def collect_data(num_laps=50, max_steps=500000):
+# -------------------------------------------------------------------------
+# Dataset capture via the scripted pilot
+# -------------------------------------------------------------------------
+def record_bot_dataset(num_laps=50, max_steps=500000):
     print("\n" + "=" * 60)
-    print("  PHASE 1: Collecting data (aggressive driver)")
-    print("  Make sure TORCS is running with Corkscrew track!")
+    print("  Capturing dataset with the scripted pilot")
+    print("  (TORCS must be running on the Corkscrew circuit)")
     print("=" * 60)
 
     
-    C = snakeoil3.Client(p=PORT)
+    C = snakeoil3.Client(p=SCR_PORT)
     C.MAX_STEPS = max_steps
 
     # Load existing data if available
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, 'r') as f:
-            all_data = json.load(f)
-        if all_data and len(all_data[0].get('state', [])) not in (STATE_DIM, LEGACY_STATE_DIM):
-            print(f"  Incompatible existing {DATA_FILE}: state_dim={len(all_data[0].get('state', []))}, expected {STATE_DIM}.")
+    if os.path.exists(DATASET_PATH):
+        with open(DATASET_PATH, 'r') as f:
+            dataset = json.load(f)
+        if dataset and len(dataset[0].get('state', [])) not in (FEATURE_DIM, LEGACY_FEATURE_DIM):
+            print(f"  Incompatible existing {DATASET_PATH}: state_dim={len(dataset[0].get('state', []))}, expected {FEATURE_DIM}.")
             print("  Move/delete old data before collecting in the new format.")
             C.shutdown()
             return
-        print(f"  Loaded {len(all_data)} existing samples, continuing...")
+        print(f"  Loaded {len(dataset)} existing samples, continuing...")
     else:
-        all_data = []
+        dataset = []
 
 
-    lap_count = 0
-    prev_last_lap = 0.0
+    laps_done = 0
+    last_lap_seen = 0.0
     lap_start_dist = None
 
     for step in range(max_steps, 0, -1):
@@ -391,31 +390,31 @@ def collect_data(num_laps=50, max_steps=500000):
         if lap_start_dist is None:
             lap_start_dist = float(S.get('distRaced', 0.0))
 
-        state = get_state(S, lap_start_dist)
-        action = rule_based_action_with_brake(S)  # [steer, accel, brake]
-        all_data.append({
+        state = build_observation(S, lap_start_dist)
+        action = scripted_action(S)  # [steer, accel, brake]
+        dataset.append({
             'state': state.tolist(),
             'action': action.tolist(),
         })
 
-        rule_based_drive_full(S, C.R.d)
+        scripted_pilot(S, C.R.d)
 
         dist  = float(S.get('distRaced', 0.0))
         speed = float(S.get('speedX', 0.0))
-        cur_step = max_steps - step
+        done_steps = max_steps - step
 
-        if cur_step % 500 == 0 and cur_step > 0:
-            print(f"    step {cur_step:5d} | dist={dist:6.0f}m | "
+        if done_steps % 500 == 0 and done_steps > 0:
+            print(f"    step {done_steps:5d} | dist={dist:6.0f}m | "
                   f"speed={speed:5.1f}km/h | "
                   f"tpos={S.get('trackPos', 0):+.3f}")
 
         last_lap = float(S.get('lastLapTime', 0.0))
-        if last_lap > 0 and last_lap != prev_last_lap:
-            lap_count += 1
-            prev_last_lap = last_lap
-            print(f"\n  Lap {lap_count} completed! Time: {last_lap:.2f}s | "
+        if last_lap > 0 and last_lap != last_lap_seen:
+            laps_done += 1
+            last_lap_seen = last_lap
+            print(f"\n  Lap {laps_done} completed! Time: {last_lap:.2f}s | "
                   f"Total dist: {dist:.0f}m")
-            if lap_count >= num_laps:
+            if laps_done >= num_laps:
                 print(f"  Collected {num_laps} laps, stopping.")
                 break
 
@@ -423,55 +422,55 @@ def collect_data(num_laps=50, max_steps=500000):
 
     C.shutdown()
 
-    with open(DATA_FILE, 'w') as f:
-        json.dump(all_data, f)
-    print(f"\n  Collected {len(all_data)} samples -> {DATA_FILE}")
+    with open(DATASET_PATH, 'w') as f:
+        json.dump(dataset, f)
+    print(f"\n  Collected {len(dataset)} samples -> {DATASET_PATH}")
     # Verify brake distribution
     import json as _json
-    with open(DATA_FILE) as f:
+    with open(DATASET_PATH) as f:
         d = _json.load(f)
     brakes = [x['action'][2] for x in d]
     brake_nonzero = sum(1 for b in brakes if b > 0.05)
     print(f"  Brake>0.05 samples: {brake_nonzero} ({100*brake_nonzero/len(brakes):.1f}%)")
 
 
-# ============================================================
-# PHASE 2: BEHAVIORAL CLONING — unchanged except action_dim=3
-# ============================================================
-def train_bc(epochs=500, batch_size=256):
+# -------------------------------------------------------------------------
+# Imitation training (behavioral cloning)
+# -------------------------------------------------------------------------
+def fit_behavior_clone(epochs=500, batch_size=256):
     import torch
     import torch.nn as nn
     import torch.optim as optim
-    from model import Actor
+    from model import ClonePolicy
 
     print("\n" + "=" * 60)
-    print("  PHASE 2: Behavioral Cloning")
+    print("  Imitation training")
     print("=" * 60)
 
-    if not os.path.exists(DATA_FILE):
+    if not os.path.exists(DATASET_PATH):
         print(f"  No data! Run: python train.py collect")
         return
 
-    with open(DATA_FILE, 'r') as f:
+    with open(DATASET_PATH, 'r') as f:
         base_data = json.load(f)
     if not base_data:
-        print(f"  Empty data file: {DATA_FILE}")
+        print(f"  Empty data file: {DATASET_PATH}")
         return
 
     try:
-        base_prepared, base_group_ids, base_legacy = prepare_training_samples(
-            base_data, DATA_FILE)
+        base_prepared, base_group_ids, base_legacy = normalize_dataset(
+            base_data, DATASET_PATH)
     except ValueError as e:
         print(f"  Incompatible data: {e}")
         return
 
-    train_idx, val_idx, group_counts, val_groups = split_by_lap_groups(
+    train_idx, val_idx, group_counts, val_groups = holdout_lap_groups(
         base_group_ids)
     train_data = [base_prepared[i] for i in train_idx]
     val_data = [base_prepared[i] for i in val_idx]
 
     print(f"  Loaded {len(base_prepared)} base samples")
-    print(f"  Current state dim: {STATE_DIM} (legacy {LEGACY_STATE_DIM}D samples are converted)")
+    print(f"  Current state dim: {FEATURE_DIM} (legacy {LEGACY_FEATURE_DIM}D samples are converted)")
     if base_legacy:
         print(f"  Converted legacy base samples: {base_legacy} (dropped prev_action, rebased lap_pos)")
     print(f"  Lap-like groups: {len(group_counts)} | validation groups: {len(val_groups)}")
@@ -481,29 +480,29 @@ def train_bc(epochs=500, batch_size=256):
     else:
         print("  Validation disabled: not enough lap groups")
 
-    if os.path.exists(CORRECTION_FILE):
-        with open(CORRECTION_FILE, 'r') as f:
+    if os.path.exists(CORRECTIONS_PATH):
+        with open(CORRECTIONS_PATH, 'r') as f:
             correction_data = json.load(f)
         if correction_data:
             try:
-                correction_prepared, _, correction_legacy = prepare_training_samples(
-                    correction_data, CORRECTION_FILE)
+                correction_prepared, _, correction_legacy = normalize_dataset(
+                    correction_data, CORRECTIONS_PATH)
             except ValueError as e:
                 print(f"  Incompatible corrections: {e}")
                 return
-            train_data.extend(correction_prepared * CORRECTION_REPEAT)
+            train_data.extend(correction_prepared * CORRECTION_OVERSAMPLE)
             print(f"  Loaded {len(correction_prepared)} correction samples")
             if correction_legacy:
                 print(f"  Converted legacy correction samples: {correction_legacy}")
-            print(f"  Correction weight: x{CORRECTION_REPEAT}")
+            print(f"  Correction weight: x{CORRECTION_OVERSAMPLE}")
             print(f"  Effective training samples: {len(train_data)}")
         else:
-            print(f"  Correction file is empty: {CORRECTION_FILE}")
+            print(f"  Correction file is empty: {CORRECTIONS_PATH}")
     else:
-        print(f"  No correction file found: {CORRECTION_FILE}")
+        print(f"  No correction file found: {CORRECTIONS_PATH}")
 
-    if os.path.exists(CORRECTION_PENDING_FILE):
-        print(f"  Pending corrections found: {CORRECTION_PENDING_FILE}")
+    if os.path.exists(CORRECTIONS_PENDING_PATH):
+        print(f"  Pending corrections found: {CORRECTIONS_PENDING_PATH}")
         print(f"  Run: python combine_corrections.py before final correction training")
 
     print(f"  Action dim: {len(train_data[0]['action'])} (steer, accel, brake)")
@@ -516,14 +515,14 @@ def train_bc(epochs=500, batch_size=256):
     # ── Loss weighting ────────────────────────────────────────────────────
     # Human braking is rare (~6% of frames) but sharp (~0.66 when present), so
     # plain per-frame MSE averages it toward zero and the brake head goes dead
-    # (it predicts ~0 through corner-entry braking zones -> overspeed -> off).
+    # (it predicts ~0 through corner-entry braking zones -> excess -> off).
     # Two corrections:
     #   1. per-sample weight rises with brake magnitude, so braking frames are
     #      not drowned by the mass of straight-line throttle frames;
     #   2. per-output weight emphasizes the chronically under-predicted brake
     #      head relative to steer/accel.
-    brake_sample_weight = get_int_flag("--brake-weight", 10)
-    brake_output_weight = get_int_flag("--brake-out-weight", 3)
+    brake_sample_weight = cli_int_flag("--brake-weight", 10)
+    brake_output_weight = cli_int_flag("--brake-out-weight", 3)
     output_weights = torch.FloatTensor([1.0, 1.0, float(brake_output_weight)])
 
     train_weights = 1.0 + float(brake_sample_weight) * train_actions[:, 2]
@@ -538,14 +537,14 @@ def train_bc(epochs=500, batch_size=256):
           f"({100.0 * n_braking / max(1, n_total):.1f}%) "
           f"| mean weight braking={mean_w_brake:.2f} non-braking={mean_w_rest:.2f}")
 
-    actor     = Actor(STATE_DIM)
+    actor     = ClonePolicy(FEATURE_DIM)
     optimizer = optim.Adam(actor.parameters(), lr=0.001)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=150, gamma=0.5)
     best_score = float('inf')
 
     def evaluate(states_t, actions_t):
         actor.eval()
-        sum_sq = torch.zeros(ACTION_DIM)
+        sum_sq = torch.zeros(CONTROL_DIM)
         count = 0
         with torch.no_grad():
             for i in range(0, len(states_t), 4096):
@@ -623,27 +622,27 @@ def train_bc(epochs=500, batch_size=256):
 
 
 
-# ============================================================
-# PLAY MODE — AI controls steer, accel, brake. Code: gears only.
-# ============================================================
-def play_model():
+# -------------------------------------------------------------------------
+# Inference loop — the policy drives; code only shifts gears
+# -------------------------------------------------------------------------
+def run_policy():
     import torch
-    from model import Actor
+    from model import ClonePolicy
 
     print("\n" + "=" * 60)
-    print("  PLAY MODE — AI controls steer, accel, brake")
+    print("  Inference — the policy is driving")
     print("=" * 60)
 
-    actor = Actor(STATE_DIM)
+    actor = ClonePolicy(FEATURE_DIM)
     if not os.path.exists("bc_model.pth"):
-        print("  NO MODEL FOUND!")
+        print("  No trained policy found on disk.")
         return
     try:
         actor.load_state_dict(
             torch.load("bc_model.pth", map_location='cpu', weights_only=False))
     except RuntimeError as e:
         print("  Incompatible model file: bc_model.pth")
-        print(f"  Current STATE_DIM={STATE_DIM}. Retrain with fresh data: python train.py bc")
+        print(f"  Current FEATURE_DIM={FEATURE_DIM}. Retrain with fresh data: python train.py bc")
         print(f"  Details: {e}")
         return
     model_file = "bc_model.pth"
@@ -652,7 +651,7 @@ def play_model():
 
     use_steer_smoothing = "--raw-steer" not in COMMAND_FLAGS
 
-    C = snakeoil3.Client(p=PORT)
+    C = snakeoil3.Client(p=SCR_PORT)
     C.MAX_STEPS = 50000
     C.get_servers_input()
     S = C.S.d
@@ -663,9 +662,9 @@ def play_model():
     prev_steer = 0.0
     prev_cmd = [0.0, 0.0, 0.0]
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    os.makedirs(PLAY_LOG_DIR, exist_ok=True)
-    play_log_path = os.path.join(PLAY_LOG_DIR, f"play_{run_id}.jsonl")
-    latest_log_path = os.path.join(PLAY_LOG_DIR, "play_latest.jsonl")
+    os.makedirs(RUN_LOG_DIR, exist_ok=True)
+    play_log_path = os.path.join(RUN_LOG_DIR, f"play_{run_id}.jsonl")
+    latest_log_path = os.path.join(RUN_LOG_DIR, "play_latest.jsonl")
     play_log_files = [
         open(play_log_path, "w", encoding="utf-8", buffering=1),
         open(latest_log_path, "w", encoding="utf-8", buffering=1),
@@ -690,24 +689,24 @@ def play_model():
         "type": "meta",
         "run_id": run_id,
         "command": " ".join(["train.py"] + COMMAND_ARGS),
-        "state_dim": STATE_DIM,
+        "state_dim": FEATURE_DIM,
         "model_file": model_file,
         "flags": sorted(COMMAND_FLAGS),
         "steer_smoothing": use_steer_smoothing,
-        "base_steer_rate": BASE_STEER_RATE,
-        "lap_threshold": LAP_THRESHOLD,
+        "base_steer_rate": STEER_SLEW_LIMIT,
+        "lap_threshold": LAP_LENGTH_M,
     })
 
     print(f"  Steer smoothing: {'ON' if use_steer_smoothing else 'off'}")
     print(f"  Play log: {os.path.abspath(play_log_path)}")
-    print("  Driving...")
+    print("  Rolling out...")
 
     dist_ep = 0.0
     stop_reason = "normal"
 
     while True:
         prev_cmd_used = [float(x) for x in prev_cmd]
-        state = get_state(S, lap_start_dist)
+        state = build_observation(S, lap_start_dist)
         with torch.no_grad():
             a = actor(torch.FloatTensor(state).unsqueeze(0)).numpy()[0]
 
@@ -741,7 +740,7 @@ def play_model():
 
         steer_cmd = raw_steer
         if use_steer_smoothing:
-            steer_delta = np.clip(raw_steer - prev_steer, -BASE_STEER_RATE, BASE_STEER_RATE)
+            steer_delta = np.clip(raw_steer - prev_steer, -STEER_SLEW_LIMIT, STEER_SLEW_LIMIT)
             steer_cmd = float(np.clip(prev_steer + steer_delta, -1, 1))
         prev_steer = steer_cmd
         prev_cmd = [steer_cmd, accel_cmd, brake_cmd]
@@ -804,8 +803,8 @@ def play_model():
                   f"{float(S.get('speedX', 0)):5.1f}km/h | "
                   f"lap={float(S.get('curLapTime', 0)):.1f}s")
 
-        if dist_ep > LAP_THRESHOLD * 2:
-            print(f"\n  Done! Distance: {dist_ep:.0f}m")
+        if dist_ep > LAP_LENGTH_M * 2:
+            print(f"\n  Reached target distance: {dist_ep:.0f}m")
             break
         if steps > 30000:
             break
@@ -822,23 +821,23 @@ def play_model():
     print(f"  Latest log alias: {os.path.abspath(latest_log_path)}")
 
 
-# ============================================================
-# MAIN
-# ============================================================
+# -------------------------------------------------------------------------
+# Command-line entry
+# -------------------------------------------------------------------------
 if __name__ == "__main__":
     if COMMAND == "collect":
-        collect_data(num_laps=50)
+        record_bot_dataset(num_laps=50)
     elif COMMAND == "human_collect":
         from human_drive import human_collect_data
         human_collect_data(
-            num_laps=get_int_flag("--laps", 50),
+            num_laps=cli_int_flag("--laps", 50),
             auto_reset_each_lap=("--reset-each-lap" in COMMAND_FLAGS),
         )
     elif COMMAND == "correction_collect":
         from human_drive import human_collect_data
         correction_output = (
-            CORRECTION_PENDING_FILE if os.path.exists(CORRECTION_FILE)
-            else CORRECTION_FILE
+            CORRECTIONS_PENDING_PATH if os.path.exists(CORRECTIONS_PATH)
+            else CORRECTIONS_PATH
         )
         human_collect_data(
             output_file=correction_output,
@@ -846,18 +845,18 @@ if __name__ == "__main__":
             allow_low_progress=("--allow-start" in COMMAND_FLAGS),
         )
     elif COMMAND == "bc":
-        train_bc(epochs=500)
+        fit_behavior_clone(epochs=500)
     elif COMMAND == "offline_validate":
         from offline_validate import main as offline_validate_main
         offline_validate_main(COMMAND_ARGS[1:])
     elif COMMAND == "play":
         try:
-            play_model()
+            run_policy()
         except KeyboardInterrupt:
             print("\n  Play interrupted by user.")
-            print(f"  Latest log alias: {os.path.abspath(os.path.join(PLAY_LOG_DIR, 'play_latest.jsonl'))}")
+            print(f"  Latest log alias: {os.path.abspath(os.path.join(RUN_LOG_DIR, 'play_latest.jsonl'))}")
     else:
-        print("TORCS Corkscrew AI Training Pipeline (Human-in-the-loop)")
+        print("BrokeCoders — TORCS imitation pipeline")
         print("=" * 45)
         print("  python train.py collect         # Phase 1: collect data using aggressive bot")
         print("  python train.py human_collect   # Phase 1: collect data manually (Play the game!)")
@@ -872,4 +871,4 @@ if __name__ == "__main__":
         print("  python train.py bc --brake-weight=10 --brake-out-weight=3 # Tune brake loss weighting")
         print("  Note: current model expects 17-dim states; legacy 20-dim data is converted during training.")
         print()
-        print("Order: human_collect -> bc -> play -> correction_collect -> combine_corrections.py -> bc -> play")
+        print("Flow: human_collect -> bc -> play -> correction_collect -> combine_corrections.py -> bc")

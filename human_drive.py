@@ -5,7 +5,7 @@ import os
 import signal
 import time
 import numpy as np
-from train import get_state, _apply_gears, DATA_FILE, LEGACY_STATE_DIM, PORT, STATE_DIM
+from train import build_observation, pick_gear, DATASET_PATH, LEGACY_FEATURE_DIM, SCR_PORT, FEATURE_DIM
 
 
 class KeyboardInput:
@@ -406,7 +406,7 @@ def human_collect_data(num_laps: int = 50, max_steps: int = 500_000,
     font  = pygame.font.SysFont("monospace", 15, bold=True)
     small = pygame.font.SysFont("monospace", 13)
 
-    C = snakeoil3.Client(p=PORT)
+    C = snakeoil3.Client(p=SCR_PORT)
     C.MAX_STEPS = max_steps
     C.get_servers_input()
     S = C.S.d
@@ -444,8 +444,8 @@ def human_collect_data(num_laps: int = 50, max_steps: int = 500_000,
         print("  wolniejszy wjazd w zakret i lekkie bledy linii z bezpiecznym powrotem.")
         if os.path.exists(OUTPUT_FILE):
             state_dim = get_first_state_dim(OUTPUT_FILE)
-            if state_dim is not None and state_dim not in (STATE_DIM, LEGACY_STATE_DIM):
-                print(f"  NIEZGODNE DANE: {OUTPUT_FILE} ma state_dim={state_dim}, a kod oczekuje {STATE_DIM}.")
+            if state_dim is not None and state_dim not in (FEATURE_DIM, LEGACY_FEATURE_DIM):
+                print(f"  NIEZGODNE DANE: {OUTPUT_FILE} ma state_dim={state_dim}, a kod oczekuje {FEATURE_DIM}.")
                 print("  Przenies/usun stary plik przed dalsza kolekcja.")
                 pygame.quit()
                 C.shutdown()
@@ -455,25 +455,25 @@ def human_collect_data(num_laps: int = 50, max_steps: int = 500_000,
             print(f"  Tryb korekt: znaleziono {OUTPUT_FILE} ze {samples_existing} probkami.")
         else:
             print(f"  Tryb korekt: utworze nowy plik {OUTPUT_FILE}.")
-    elif os.path.exists(DATA_FILE):
-        state_dim = get_first_state_dim(DATA_FILE)
-        if state_dim is not None and state_dim not in (STATE_DIM, LEGACY_STATE_DIM):
-            print(f"  NIEZGODNE DANE: {DATA_FILE} ma state_dim={state_dim}, a kod oczekuje {STATE_DIM}.")
+    elif os.path.exists(DATASET_PATH):
+        state_dim = get_first_state_dim(DATASET_PATH)
+        if state_dim is not None and state_dim not in (FEATURE_DIM, LEGACY_FEATURE_DIM):
+            print(f"  NIEZGODNE DANE: {DATASET_PATH} ma state_dim={state_dim}, a kod oczekuje {FEATURE_DIM}.")
             print("  Przenies/usun stare driving_data*.json i zbierz dane od nowa.")
             pygame.quit()
             C.shutdown()
             return
-        samples_main = count_samples(DATA_FILE)
+        samples_main = count_samples(DATASET_PATH)
         total_samples += samples_main
-        print(f"  Znaleziono {DATA_FILE} ze {samples_main} probkami.")
+        print(f"  Znaleziono {DATASET_PATH} ze {samples_main} probkami.")
         OUTPUT_FILE = DATA_FILE_TEMP
     else:
-        OUTPUT_FILE = DATA_FILE
+        OUTPUT_FILE = DATASET_PATH
 
     if OUTPUT_FILE == DATA_FILE_TEMP and os.path.exists(DATA_FILE_TEMP):
         state_dim = get_first_state_dim(DATA_FILE_TEMP)
-        if state_dim is not None and state_dim not in (STATE_DIM, LEGACY_STATE_DIM):
-            print(f"  NIEZGODNE DANE: {DATA_FILE_TEMP} ma state_dim={state_dim}, a kod oczekuje {STATE_DIM}.")
+        if state_dim is not None and state_dim not in (FEATURE_DIM, LEGACY_FEATURE_DIM):
+            print(f"  NIEZGODNE DANE: {DATA_FILE_TEMP} ma state_dim={state_dim}, a kod oczekuje {FEATURE_DIM}.")
             print("  Przenies/usun stary plik tymczasowy przed dalsza kolekcja.")
             pygame.quit()
             C.shutdown()
@@ -494,8 +494,8 @@ def human_collect_data(num_laps: int = 50, max_steps: int = 500_000,
     ctrl          = SmoothCarController()
     key_input     = KeyboardInput()
     running       = True
-    lap_count     = 0
-    prev_last_lap = 0.0
+    laps_done     = 0
+    last_lap_seen = 0.0
     f8_was_down   = False
     discard_was_down  = False
 
@@ -571,7 +571,7 @@ def human_collect_data(num_laps: int = 50, max_steps: int = 500_000,
         return removed_total
 
     def reset_car_to_start(label: str):
-        nonlocal C, S, ctrl, prev_last_lap, lap_start_dist, lap_start_session_total
+        nonlocal C, S, ctrl, last_lap_seen, lap_start_dist, lap_start_session_total
 
         C.R.d['steer'] = 0.0
         C.R.d['accel'] = 0.0
@@ -582,7 +582,7 @@ def human_collect_data(num_laps: int = 50, max_steps: int = 500_000,
 
         C.shutdown()
         time.sleep(0.5)
-        C = snakeoil3.Client(p=PORT)
+        C = snakeoil3.Client(p=SCR_PORT)
         C.MAX_STEPS = max_steps
         C.get_servers_input()
         S = C.S.d
@@ -590,7 +590,7 @@ def human_collect_data(num_laps: int = 50, max_steps: int = 500_000,
         lap_start_session_total = current_session_total()
 
         ctrl = SmoothCarController()
-        prev_last_lap = 0.0
+        last_lap_seen = 0.0
         print(f"  [{label}] Reset auta i ponowne polaczenie gotowe.")
 
     for step in range(max_steps, 0, -1):
@@ -637,16 +637,16 @@ def human_collect_data(num_laps: int = 50, max_steps: int = 500_000,
         final_steer, final_accel, final_brake = ctrl.update(key_input, speed_x, angle)
 
         # ── 4. Aktualizuj UI ─────────────────────────────────────────────────
-        cur_step = max_steps - step
+        done_steps = max_steps - step
         current_total = total_samples + session_saved_count + len(session_data)
         draw_ui(screen, font, small, ctrl,
                 final_steer, final_accel, final_brake,
-                speed_x, dist, current_total, lap_count, speed_x)
+                speed_x, dist, current_total, laps_done, speed_x)
 
         # ── 5. Zapisz dane ────────────────────────────────────────────────────
         #  Zapisujemy tylko gdy auto jest aktywne i znajduje się NA torze.
         #  trackPos ∈ (-1, 1) oznacza bycie na asfalcie.
-        state = get_state(S, lap_start_dist)
+        state = build_observation(S, lap_start_dist)
         session_data.append({
             'state': state.tolist(),
             'action': [final_steer, final_accel, final_brake],
@@ -654,13 +654,13 @@ def human_collect_data(num_laps: int = 50, max_steps: int = 500_000,
         current_total += 1
 
         # ── 6. Logowanie ──────────────────────────────────────────────────────
-        if cur_step % 500 == 0 and cur_step > 0:
-            print(f"  krok {cur_step:5d} | dist={dist:6.0f}m | "
+        if done_steps % 500 == 0 and done_steps > 0:
+            print(f"  krok {done_steps:5d} | dist={dist:6.0f}m | "
                   f"v={speed_x:5.1f}km/h | tpos={track_pos:+.3f} | "
                   f"SC={'ON ' if ctrl.is_sc_active else 'off'} | "
                   f"probki={current_total}")
 
-        if cur_step % 2000 == 0 and cur_step > 0:
+        if done_steps % 2000 == 0 and done_steps > 0:
             import threading
             chunk_to_save = session_data[:]
             session_saved_count += len(chunk_to_save)
@@ -677,19 +677,19 @@ def human_collect_data(num_laps: int = 50, max_steps: int = 500_000,
         # ── 7. Sprawdź okrążenie ──────────────────────────────────────────────
         new_lap_completed = False
         last_lap = float(S.get('lastLapTime', 0.0))
-        if last_lap > 0 and last_lap != prev_last_lap:
-            lap_count    += 1
-            prev_last_lap = last_lap
+        if last_lap > 0 and last_lap != last_lap_seen:
+            laps_done    += 1
+            last_lap_seen = last_lap
             new_lap_completed = True
-            if auto_reset_each_lap and lap_count < num_laps:
-                print(f"\n  Okrazenie {lap_count} ukonczone! Czas: {last_lap:.2f}s | Dist: {dist:.0f}m")
-                save_current_segment(f"Lap {lap_count}")
-                reset_car_to_start(f"Lap {lap_count}")
+            if auto_reset_each_lap and laps_done < num_laps:
+                print(f"\n  Okrazenie {laps_done} ukonczone! Czas: {last_lap:.2f}s | Dist: {dist:.0f}m")
+                save_current_segment(f"Lap {laps_done}")
+                reset_car_to_start(f"Lap {laps_done}")
                 continue
-            print(f"\n  Okrazenie {lap_count} ukonczone! "
+            print(f"\n  Okrazenie {laps_done} ukonczone! "
                   f"Czas: {last_lap:.2f}s | Dist: {dist:.0f}m | "
                   f"Probki: {current_total}")
-            if lap_count >= num_laps:
+            if laps_done >= num_laps:
                 print(f"  Zebrano {num_laps} okrazen — zatrzymuje.")
                 break
 
@@ -702,7 +702,7 @@ def human_collect_data(num_laps: int = 50, max_steps: int = 500_000,
         R['steer'] = final_steer
         R['accel'] = final_accel
         R['brake'] = final_brake
-        _apply_gears(speed_x, R)
+        pick_gear(speed_x, R)
         C.respond_to_server()
 
     pygame.quit()

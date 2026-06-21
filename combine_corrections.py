@@ -1,7 +1,7 @@
 import json
 import os
 
-from train import LEGACY_STATE_DIM, STATE_DIM, prepare_training_samples
+from train import LEGACY_FEATURE_DIM, FEATURE_DIM, normalize_dataset
 
 MAIN_FILE = 'correction_data.json'
 TEMP_FILE = 'correction_data_toCombine.json'
@@ -13,7 +13,7 @@ def load_json(filepath):
 
 
 def normalize_data(data, source_name):
-    prepared, _, legacy_count = prepare_training_samples(data, source_name)
+    prepared, _, legacy_count = normalize_dataset(data, source_name)
     normalized = [
         {'state': row['state'], 'action': row['action']}
         for row in prepared
@@ -21,7 +21,7 @@ def normalize_data(data, source_name):
     if legacy_count:
         print(
             f"Converted {legacy_count} legacy correction samples "
-            f"{LEGACY_STATE_DIM}D -> {STATE_DIM}D."
+            f"{LEGACY_FEATURE_DIM}D -> {FEATURE_DIM}D."
         )
     return normalized
 
@@ -72,7 +72,7 @@ def main():
         print(f"Main file '{MAIN_FILE}' does not exist. Creating it.")
         main_data = temp_data
 
-    print(f"Saving {len(main_data)} normalized {STATE_DIM}D samples to '{MAIN_FILE}'...")
+    print(f"Saving {len(main_data)} normalized {FEATURE_DIM}D samples to '{MAIN_FILE}'...")
     with open(MAIN_FILE, 'w') as f:
         json.dump(main_data, f)
 

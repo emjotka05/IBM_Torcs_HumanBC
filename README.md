@@ -23,7 +23,7 @@ When the car develops a bad habit, a fourth stage closes the loop: you record sh
 
 ## Under the hood
 
-**What the network sees** — a 17-number snapshot built every frame (`get_state`):
+**What the network sees** — a 17-number snapshot built every frame (`build_observation`):
 
 - where the car points and sits on track (heading angle, track position)
 - how fast it's going (forward + sideways speed, engine RPM)
@@ -104,7 +104,7 @@ python train.py bc
 | Path | What it does |
 |------|--------------|
 | `train.py` | The whole pipeline — state encoding, the brake-weighted training loss, and the live `play` loop. |
-| `model.py` | The `Actor` network. |
+| `model.py` | The `ClonePolicy` network. |
 | `human_drive.py` | Recording mode: pygame HUD + a physics-feel keyboard controller. |
 | `granite_engineer.py` · `ask_granite_brake.py` | Feed telemetry to IBM Granite for analysis (output in `granite_analysis/`). |
 | `offline_validate.py` | Score a model against recorded laps without launching TORCS. |
@@ -128,7 +128,7 @@ This project builds on standard TORCS / SCR Python tooling. Third-party code is 
 
 The repository `LICENSE` file is the MIT licence of the upstream *gym_torcs* project (© 2016 Naoto Yoshida), retained to satisfy its attribution requirement — not a licence grant over BrokeCoders' own code.
 
-**Original work by BrokeCoders:** `train.py` (the full BC pipeline, the brake-weighted loss, and the `play` loop), `model.py` (the `Actor` network), `human_drive.py` (human data collection), the IBM Granite analysis tooling (`granite_engineer.py`, `ask_granite_brake.py`), and the validation/dataset tooling (`offline_validate.py`, `combine_data.py`, `combine_corrections.py`, `remove_lap.py`, `collect_clean_laps.py`). The trained `bc_model.pth` is derived from our own recorded laps.
+**Original work by BrokeCoders:** `train.py` (the full BC pipeline, the brake-weighted loss, and the `play` loop), `model.py` (the `ClonePolicy` network), `human_drive.py` (human data collection), the IBM Granite analysis tooling (`granite_engineer.py`, `ask_granite_brake.py`), and the validation/dataset tooling (`offline_validate.py`, `combine_data.py`, `combine_corrections.py`, `remove_lap.py`, `collect_clean_laps.py`). The trained `bc_model.pth` is derived from our own recorded laps.
 
 Per the competition rules, only the AI Python code is modified — the TORCS car physics and the Corkscrew track definition are untouched.
 
