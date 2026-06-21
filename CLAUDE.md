@@ -18,7 +18,6 @@ python train.py correction_collect [--allow-start]        # record targeted reco
 python train.py bc [--brake-weight=N]                     # train the BC model -> bc_model.pth
 python train.py offline_validate                          # compare model vs recorded human actions (no TORCS)
 python train.py play [mode flags]                         # run the trained model in TORCS
-python train.py collect                                   # legacy: collect data from the built-in aggressive bot
 ```
 
 Helper scripts (run standalone):
@@ -46,7 +45,7 @@ There is no "run a single test" — validation is `offline_validate` (offline, m
 17 features, in order: `angle/PI`, `trackPos`, `speedX/300`, `speedY/300`, `rpm/10000`, `lap_pos`, `sin(lap_angle)`, `cos(lap_angle)`, then 9 normalized track range-finder sensors at indices `[0,3,5,7,9,11,13,16,18]/200`. `lap_pos` is episode-relative distance modulo `LAP_LENGTH_M = 3600` (track-specific). There are **no autoregressive `prev_action` features** in the live model — earlier 20-dim datasets included them.
 
 ### `train.py` is the spine
-~875 lines: CLI parsing, state construction, the scripted data-collection bot, BC training, and the play loop. A few things to know before editing:
+~630 lines: CLI parsing, state construction, BC training, and the play loop. A few things to know before editing:
 - **Custom arg parsing at module top.** `COMMAND`, `COMMAND_FLAGS`, and `COMMAND_ARGS` are captured from `sys.argv`, then `sys.argv` is reset to `[sys.argv[0]]` so imported libraries don't see the flags. Use `cli_int_flag(...)` / `COMMAND_FLAGS` rather than reintroducing `argparse` at the top level.
 - **Legacy data conversion.** `normalize_dataset` accepts both 17-dim and legacy 20-dim samples; 20-dim ones are downconverted (drop `prev_action`, rebase `lap_pos`). Keep this path working — most existing datasets predate the 17-dim format.
 - **Lap-group validation.** `holdout_lap_groups` holds out whole lap-like groups (not random frames) so validation isn't leaking adjacent frames. `fit_behavior_clone` reports per-output MSE and saves the best checkpoint to `bc_model.pth`.

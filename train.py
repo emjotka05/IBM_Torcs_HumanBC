@@ -182,92 +182,8 @@ def holdout_lap_groups(group_ids, min_lap_samples=500, val_fraction=0.20):
 
 
 # -------------------------------------------------------------------------
-# Look-ahead speed cap (scripted pilot)
+# Gear selection (shared by play + human recording)
 # -------------------------------------------------------------------------
-def speed_cap_from_track(track):
-    front = [track[i] for i in range(7, 12)]
-    ahead_min = min(front)
-    wide_front = [track[i] for i in range(5, 14)]
-    wide_band = min(wide_front)
-    clearance = min(ahead_min, wide_band)
-
-    if clearance > 180:   return 320
-    elif clearance > 150: return 300
-    elif clearance > 100: return 250
-    elif clearance > 80:  return 220
-    elif clearance > 50:  return 190
-    elif clearance > 38:  return 160
-    elif clearance > 30:  return 140
-    elif clearance > 25:  return 130
-    elif clearance > 18:  return 105
-    elif clearance > 12:  return 85
-    elif clearance > 8:   return 65
-    else:                  return 45
-
-
-def corner_bias(track):
-    left_open  = sum(track[0:7])
-    right_open = sum(track[12:19])
-    diff = right_open - left_open
-    if abs(diff) < 30:
-        return 0
-    return 1 if diff > 0 else -1
-
-
-# -------------------------------------------------------------------------
-# Scripted braking + gear logic (dataset capture only)
-# -------------------------------------------------------------------------
-def scripted_brake_and_shift(S, R):
-    speed_x    = float(S.get('speedX', 0))
-    angle      = float(S.get('angle', 0))
-    speed_y    = float(S.get('speedY', 0))
-    track      = S.get('track', [100.0] * 19)
-    wheel_slip = S.get('wheelSpinVel', [0, 0, 0, 0])
-
-    v_cap = speed_cap_from_track(track)
-    ahead_min = min(track[7], track[8], track[9], track[10], track[11])
-
-    if ahead_min < 50 and speed_x > 140:
-        R['brake'] = 0.7; R['accel'] = 0.0
-        pick_gear(speed_x, R); return
-    if ahead_min < 30 and speed_x > 100:
-        R['brake'] = 0.9; R['accel'] = 0.0
-        pick_gear(speed_x, R); return
-
-    if speed_x > v_cap:
-        excess = speed_x - v_cap
-        if excess > 80:
-            R['brake'] = 1.0; R['accel'] = 0.0
-        elif excess > 50:
-            R['brake'] = 0.7; R['accel'] = 0.0
-        elif excess > 25:
-            R['brake'] = 0.4; R['accel'] = 0.0
-        else:
-            R['brake'] = 0.15
-    else:
-        R['brake'] = 0.0
-
-    if abs(angle) > 0.5:
-        R['brake'] = max(R.get('brake', 0), 0.7); R['accel'] = 0.0
-    elif abs(angle) > 0.3:
-        R['brake'] = max(R.get('brake', 0), 0.3)
-        R['accel'] = min(R.get('accel', 0), 0.2)
-
-    if abs(speed_y) > 30:
-        R['brake'] = max(R.get('brake', 0), 0.2)
-        R['accel'] = min(R.get('accel', 0), 0.3)
-
-    if speed_x > 10:
-        slip = sum(abs(wheel_slip[i] * 0.3 - speed_x) for i in range(4))
-        if slip / 4 > speed_x * 0.5:
-            R['brake'] = R.get('brake', 0) * 0.6
-
-    if (wheel_slip[2] + wheel_slip[3]) - (wheel_slip[0] + wheel_slip[1]) > 8:
-        R['accel'] = max(0.0, R.get('accel', 0) - 0.15)
-
-    pick_gear(speed_x, R)
-
-
 def pick_gear(speed_x, R):
     gear = 1
     if speed_x > 40:  gear = 2
@@ -276,162 +192,6 @@ def pick_gear(speed_x, R):
     if speed_x > 135: gear = 5
     if speed_x > 170: gear = 6
     R['gear'] = gear
-
-
-# -------------------------------------------------------------------------
-# Scripted steering + throttle — the demo pilot
-# -------------------------------------------------------------------------
-WHEEL_LOCK = 0.366
-
-def scripted_steer_throttle(S):
-    angle     = float(S.get('angle', 0.0))
-    track_pos = float(S.get('trackPos', 0.0))
-    speed_x   = float(S.get('speedX', 0.0))
-    track     = S.get('track', [100.0] * 19)
-
-    v_cap = speed_cap_from_track(track)
-
-    steer = angle * 0.8 / WHEEL_LOCK - track_pos * 0.35
-
-    turn_bias = corner_bias(track)
-    if turn_bias != 0 and speed_x > 40 and abs(track_pos) < 0.4:
-        steer -= turn_bias * 0.1
-
-    steer = max(-1.0, min(1.0, steer))
-
-    deficit = v_cap - speed_x
-    if speed_x < v_cap:
-        if deficit > 60:    accel = 1.0
-        elif deficit > 30:  accel = 0.8
-        elif deficit > 10:  accel = 0.5
-        else:                  accel = 0.3
-    else:
-        accel = 0.0
-
-    if speed_x < 10: accel = max(accel, 1.0)
-    if abs(angle) > 0.7: accel = 0.0
-    elif abs(angle) > 0.4: accel = min(accel, 0.2)
-
-    if abs(track_pos) > 0.95:
-        steer = -track_pos * 0.5; accel = 0.15
-    if abs(track_pos) > 1.0:
-        steer = -track_pos * 0.8; accel = 0.05
-
-    look = min(min(track[7:12]), min(track[5:14]))
-    if abs(track_pos) > 0.7 and look < 33 and accel > 0.2:
-        accel = 0.15
-
-    return np.array([steer, accel], dtype=np.float32)
-
-
-# -------------------------------------------------------------------------
-# Scripted full control: [steer, throttle, brake]
-# (only used to build the training dataset)
-# -------------------------------------------------------------------------
-def scripted_action(S):
-    """Full [steer, throttle, brake] target for a single frame."""
-    action_2 = scripted_steer_throttle(S)
-    steer = float(action_2[0])
-    accel = float(action_2[1])
-
-    # Compute brake using scripted_brake_and_shift logic
-    R = {'steer': steer, 'accel': accel, 'brake': 0.0}
-    scripted_brake_and_shift(S, R)
-    brake = float(R.get('brake', 0.0))
-    # Sync accel with what scripted_brake_and_shift decided
-    accel = float(R.get('accel', accel))
-
-    return np.array([steer, accel, brake], dtype=np.float32)
-
-
-def scripted_pilot(S, R):
-    """Drive the car with the scripted pilot (silent)."""
-    action = scripted_action(S)
-    R['steer'] = float(action[0])
-    R['accel'] = float(action[1])
-    R['brake'] = float(action[2])
-    pick_gear(float(S.get('speedX', 0)), R)
-
-
-# -------------------------------------------------------------------------
-# Dataset capture via the scripted pilot
-# -------------------------------------------------------------------------
-def record_bot_dataset(num_laps=50, max_steps=500000):
-    print("\n" + "=" * 60)
-    print("  Capturing dataset with the scripted pilot")
-    print("  (TORCS must be running on the Corkscrew circuit)")
-    print("=" * 60)
-
-    
-    C = snakeoil3.Client(p=SCR_PORT)
-    C.MAX_STEPS = max_steps
-
-    # Load existing data if available
-    if os.path.exists(DATASET_PATH):
-        with open(DATASET_PATH, 'r') as f:
-            dataset = json.load(f)
-        if dataset and len(dataset[0].get('state', [])) not in (FEATURE_DIM, LEGACY_FEATURE_DIM):
-            print(f"  Incompatible existing {DATASET_PATH}: state_dim={len(dataset[0].get('state', []))}, expected {FEATURE_DIM}.")
-            print("  Move/delete old data before collecting in the new format.")
-            C.shutdown()
-            return
-        print(f"  Loaded {len(dataset)} existing samples, continuing...")
-    else:
-        dataset = []
-
-
-    laps_done = 0
-    last_lap_seen = 0.0
-    lap_start_dist = None
-
-    for step in range(max_steps, 0, -1):
-        C.get_servers_input()
-        S = C.S.d
-        if lap_start_dist is None:
-            lap_start_dist = float(S.get('distRaced', 0.0))
-
-        state = build_observation(S, lap_start_dist)
-        action = scripted_action(S)  # [steer, accel, brake]
-        dataset.append({
-            'state': state.tolist(),
-            'action': action.tolist(),
-        })
-
-        scripted_pilot(S, C.R.d)
-
-        dist  = float(S.get('distRaced', 0.0))
-        speed = float(S.get('speedX', 0.0))
-        done_steps = max_steps - step
-
-        if done_steps % 500 == 0 and done_steps > 0:
-            print(f"    step {done_steps:5d} | dist={dist:6.0f}m | "
-                  f"speed={speed:5.1f}km/h | "
-                  f"tpos={S.get('trackPos', 0):+.3f}")
-
-        last_lap = float(S.get('lastLapTime', 0.0))
-        if last_lap > 0 and last_lap != last_lap_seen:
-            laps_done += 1
-            last_lap_seen = last_lap
-            print(f"\n  Lap {laps_done} completed! Time: {last_lap:.2f}s | "
-                  f"Total dist: {dist:.0f}m")
-            if laps_done >= num_laps:
-                print(f"  Collected {num_laps} laps, stopping.")
-                break
-
-        C.respond_to_server()
-
-    C.shutdown()
-
-    with open(DATASET_PATH, 'w') as f:
-        json.dump(dataset, f)
-    print(f"\n  Collected {len(dataset)} samples -> {DATASET_PATH}")
-    # Verify brake distribution
-    import json as _json
-    with open(DATASET_PATH) as f:
-        d = _json.load(f)
-    brakes = [x['action'][2] for x in d]
-    brake_nonzero = sum(1 for b in brakes if b > 0.05)
-    print(f"  Brake>0.05 samples: {brake_nonzero} ({100*brake_nonzero/len(brakes):.1f}%)")
 
 
 # -------------------------------------------------------------------------
@@ -619,7 +379,6 @@ def fit_behavior_clone(epochs=500, batch_size=256):
 
     score_name = "validation" if val_states is not None else "training"
     print(f"\n  BC complete! Best weighted {score_name} score={best_score:.6f} -> bc_model.pth")
-
 
 
 # -------------------------------------------------------------------------
@@ -825,9 +584,7 @@ def run_policy():
 # Command-line entry
 # -------------------------------------------------------------------------
 if __name__ == "__main__":
-    if COMMAND == "collect":
-        record_bot_dataset(num_laps=50)
-    elif COMMAND == "human_collect":
+    if COMMAND == "human_collect":
         from human_drive import human_collect_data
         human_collect_data(
             num_laps=cli_int_flag("--laps", 50),
@@ -858,7 +615,6 @@ if __name__ == "__main__":
     else:
         print("BrokeCoders — TORCS imitation pipeline")
         print("=" * 45)
-        print("  python train.py collect         # Phase 1: collect data using aggressive bot")
         print("  python train.py human_collect   # Phase 1: collect data manually (Play the game!)")
         print("  python train.py human_collect --reset-each-lap # Phase 1: reset car after every completed lap")
         print("  python train.py human_collect --laps=10 --reset-each-lap # Phase 1: collect 10 clean reset laps")
