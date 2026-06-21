@@ -5,13 +5,15 @@ correction_data*.json
 guardian_data*.json
 *_backup_*.json
 
-# ── Run logs & offline validation outputs ────────────────────────────────
+# ── Run logs, analysis & validation outputs ──────────────────────────────
 play_logs/
 offline_validation/
+granite_analysis/
 
 # ── Model experiments / backups (main bc_model.pth IS kept) ──────────────
 model_backups/
 bc_model_*.pth
+backup_with_assists/
 
 # ── Python ───────────────────────────────────────────────────────────────
 __pycache__/
