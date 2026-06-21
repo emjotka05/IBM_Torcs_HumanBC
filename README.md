@@ -62,6 +62,12 @@ python train.py bc --brake-weight=10 --brake-out-weight=3
 
 After this change the network slams the brakes (up to full lock) into the first corner by itself and turns clean laps with no rule-based crutches.
 
+### Where IBM Granite came in
+
+We handed our real braking telemetry to a locally-run **IBM Granite** model — the model's flat-zero brake through the corner versus the human's hard braking, plus the dataset's action statistics — and asked it to diagnose and fix the training, with no hint at a solution (`granite_engineer.py` / `ask_granite_brake.py`; output saved under `granite_analysis/`).
+
+Granite independently found the same root cause (equal-weight MSE ignores the rare braking frames) and recommended re-weighting the loss toward braking. We evaluated its advice rather than copying it: we adopted its top two ideas — a heavier weight on the brake output and per-frame weighting of braking samples — in a cleaner form (its proposed formula carried an indicator term that cancels out), and deliberately dropped its third suggestion (input normalisation + extra features), since our observations are already normalised and we wanted to keep the architecture fixed. That weighing of the AI's own advice is the brake-weighted loss described above.
+
 ---
 
 ## How to run it
