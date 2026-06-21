@@ -12,7 +12,7 @@ Driving is mostly muscle memory. So rather than describe how to take a corner, w
 Three moving parts:
 
 | Stage | What happens | Entry point |
-
+|-------|--------------|-------------|
 | **Record** | You drive; every frame's situation + your pedals/wheel are saved. | `human_collect` |
 | **Clone** | A network is fit to reproduce your inputs from the situation. | `bc` |
 | **Drive** | The network takes the wheel; code only shifts gears. | `play` |
@@ -112,6 +112,25 @@ python train.py bc
 | `combine_data.py` · `combine_corrections.py` · `remove_lap.py` | Dataset upkeep. |
 | `practice.xml` · `autostart.sh` | Race configuration and (Linux) menu autostart. |
 
+---
+
+## Attribution & licensing
+
+This project builds on standard TORCS / SCR Python tooling. Third-party code is documented here as required by the competition rules, and to make clear what is our own work.
+
+**Third-party code (not written by BrokeCoders):**
+
+| File(s) | Origin | Licence |
+|---------|--------|---------|
+| `snakeoil3_gym.py`, `jmcncarai.py` | *Snake Oil* SCR TORCS client — Chris X Edwards (`snakeoil@xed.ch`, scr.geccocompetitions.com) | as distributed with the SCR tooling (see file headers) |
+| `gym_torcs.py`, `torcs_env.py`, `sample_agent.py` | *gym_torcs* — Naoto Yoshida | MIT — see `LICENSE` |
+| `practice.xml`, `autostart.sh` | TORCS race configuration + Linux menu launcher | TORCS distribution (GPL) |
+
+The repository `LICENSE` file is the MIT licence of the upstream *gym_torcs* project (© 2016 Naoto Yoshida), retained to satisfy its attribution requirement — not a licence grant over BrokeCoders' own code.
+
+**Original work by BrokeCoders:** `train.py` (the full BC pipeline, brake-weighted loss, `play` loop and assist layers), `model.py` (the `Actor` network), `human_drive.py` (human data collection), `racing_line_guardian.py` (rule-based intervention), and the validation/dataset tooling (`offline_validate.py`, `combine_data.py`, `combine_corrections.py`, `remove_lap.py`, `collect_clean_laps.py`). The trained `bc_model.pth` and `human_racing_envelope.json` are derived from our own recorded laps.
+
+Per the competition rules, only the AI Python code is modified — the TORCS car physics and the Corkscrew track definition are untouched.
 
 ---
 
