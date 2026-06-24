@@ -61,10 +61,10 @@ def import_project_modules():
         sys.path.insert(0, str(ROOT))
     try:
         import train  # pylint: disable=import-error,import-outside-toplevel
-        from model import Actor  # pylint: disable=import-error,import-outside-toplevel
+        from model import ClonePolicy  # pylint: disable=import-error,import-outside-toplevel
     finally:
         sys.argv = saved_argv
-    return train, Actor
+    return train, ClonePolicy
 
 
 def load_json(path):
@@ -72,7 +72,7 @@ def load_json(path):
         return json.load(f)
 
 
-def load_torch_model(model_path, Actor):
+def load_torch_model(model_path, ClonePolicy):
     import torch  # pylint: disable=import-outside-toplevel
 
     try:
@@ -95,14 +95,14 @@ def load_torch_model(model_path, Actor):
         raise ValueError("Cannot infer model input dimension: missing fc.0.weight.")
 
     input_dim = int(state_dict["fc.0.weight"].shape[1])
-    actor = Actor(input_dim)
+    actor = ClonePolicy(input_dim)
     actor.load_state_dict(state_dict)
     actor.eval()
     return actor, input_dim
 
 
 def prepare_current_dim(raw_data, source_name, train):
-    prepared, group_ids, legacy_count = train.prepare_training_samples(raw_data, source_name)
+    prepared, group_ids, legacy_count = train.normalize_dataset(raw_data, source_name)
     rows = []
     for idx, row in enumerate(prepared):
         rows.append({
@@ -124,7 +124,7 @@ def prepare_legacy_dim(raw_data, source_name, train):
     for idx, sample in enumerate(raw_data):
         state = [float(x) for x in sample.get("state", [])]
         action = [float(x) for x in sample.get("action", [])]
-        if len(state) != train.LEGACY_STATE_DIM or len(action) != train.ACTION_DIM:
+        if len(state) != train.LEGACY_FEATURE_DIM or len(action) != train.CONTROL_DIM:
             skipped += 1
             continue
 
@@ -145,20 +145,20 @@ def prepare_legacy_dim(raw_data, source_name, train):
 
 
 def prepare_rows_for_model(raw_data, source_name, model_input_dim, train):
-    if model_input_dim == train.STATE_DIM:
+    if model_input_dim == train.FEATURE_DIM:
         rows, legacy_count, skipped = prepare_current_dim(raw_data, source_name, train)
         return rows, legacy_count, skipped
-    if model_input_dim == train.LEGACY_STATE_DIM:
+    if model_input_dim == train.LEGACY_FEATURE_DIM:
         return prepare_legacy_dim(raw_data, source_name, train)
     raise ValueError(
         f"Unsupported model input dim {model_input_dim}. "
-        f"Expected {train.STATE_DIM} or legacy {train.LEGACY_STATE_DIM}."
+        f"Expected {train.FEATURE_DIM} or legacy {train.LEGACY_FEATURE_DIM}."
     )
 
 
 def split_rows(rows, train, min_lap_samples, val_fraction):
     group_ids = [row["group_id"] for row in rows]
-    train_idx, val_idx, group_counts, val_groups = train.split_by_lap_groups(
+    train_idx, val_idx, group_counts, val_groups = train.holdout_lap_groups(
         group_ids,
         min_lap_samples=min_lap_samples,
         val_fraction=val_fraction,
@@ -420,7 +420,7 @@ def maybe_make_plots(rows, sectors, out_dir, stamp):
 
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
-    train, Actor = import_project_modules()
+    train, ClonePolicy = import_project_modules()
 
     data_path = Path(args.data)
     model_path = Path(args.model)
@@ -432,7 +432,7 @@ def main(argv=None):
     if not model_path.exists():
         raise FileNotFoundError(f"Missing model: {model_path}")
 
-    actor, model_input_dim = load_torch_model(model_path, Actor)
+    actor, model_input_dim = load_torch_model(model_path, ClonePolicy)
     raw_data = load_json(data_path)
     rows, legacy_count, skipped = prepare_rows_for_model(
         raw_data, data_path.name, model_input_dim, train)
@@ -461,14 +461,14 @@ def main(argv=None):
     all_metrics = metrics_for(rows)
     train_metrics = metrics_for(train_rows)
     val_metrics = metrics_for(val_rows) if val_rows else None
-    health = dataset_health(rows, train.LAP_THRESHOLD)
-    sectors = sector_metrics(rows, train.LAP_THRESHOLD, args.sector_size)
+    health = dataset_health(rows, train.LAP_LENGTH_M)
+    sectors = sector_metrics(rows, train.LAP_LENGTH_M, args.sector_size)
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     pred_path = out_dir / f"offline_{stamp}_predictions.csv"
     sector_path = out_dir / f"offline_{stamp}_sector_metrics.csv"
     summary_path = out_dir / f"offline_{stamp}_summary.txt"
-    write_predictions_csv(pred_path, rows, train.LAP_THRESHOLD)
+    write_predictions_csv(pred_path, rows, train.LAP_LENGTH_M)
     write_sector_csv(sector_path, sectors)
     copy_latest(pred_path, out_dir / "offline_latest_predictions.csv")
     copy_latest(sector_path, out_dir / "offline_latest_sector_metrics.csv")
@@ -486,10 +486,10 @@ def main(argv=None):
     lines.append(f"Model:   {model_path}")
     lines.append(f"Rows: {len(rows)} | skipped incompatible: {skipped}")
     lines.append(f"Model input dim: {model_input_dim}")
-    lines.append(f"Current code STATE_DIM: {train.STATE_DIM} | legacy: {train.LEGACY_STATE_DIM}")
-    if model_input_dim != train.STATE_DIM:
+    lines.append(f"Current code FEATURE_DIM: {train.FEATURE_DIM} | legacy: {train.LEGACY_FEATURE_DIM}")
+    if model_input_dim != train.FEATURE_DIM:
         lines.append(
-            "WARNING: model input dim differs from current play/train STATE_DIM. "
+            "WARNING: model input dim differs from current play/train FEATURE_DIM. "
             "This model is useful for offline diagnosis, but current train.py play "
             "expects a freshly trained current-dim model."
         )
