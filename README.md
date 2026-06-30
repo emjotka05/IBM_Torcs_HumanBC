@@ -6,10 +6,9 @@ My entry for the **IBM AI Racing League** — an autonomous TORCS driver I built
 
 ## Idea
 
-I decided that humans are still — for now — better at this than AI, so instead of explaining cornering theory to the network, I took matters into my own hands. First I learned to drive the track properly myself; then I recorded many of my own laps and used them as training data.
+I decided that humans are superior to AI, so instead of explaining cornering theory to the network, I took matters into my own hands. First I learned to drive the track properly myself; then I recorded many of my own laps and used them as training data.
 
-The network receives the car's situation as input and my driving actions as the expected output — steering, throttle, and braking. This is **behavioral cloning**: a supervised-learning approach where the model doesn't learn to drive from scratch, but instead learns to imitate a human who already knows what they're doing.
-
+The network receives the car's situation as input and my driving actions as the expected output — steering, throttle, and braking. 
 Three moving parts:
 
 | Stage | What happens | Entry point |
