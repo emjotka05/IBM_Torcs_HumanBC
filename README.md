@@ -1,6 +1,6 @@
 # BrokeCoders · TORCS IBM 2026
 
-My entry for the **IBM AI Racing League** — an autonomous TORCS driver I built by *behavioral cloning*. I recorded my own laps and trained a small neural network to imitate them. Built solo: every layer here is my own work.
+My entry for the **IBM AI Racing League** — an autonomous TORCS driver I built by *behavioral cloning*. 
 
 ---
 
